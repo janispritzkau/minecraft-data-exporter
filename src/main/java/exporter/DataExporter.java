@@ -10,6 +10,8 @@ import net.minecraft.core.Registry;
 import net.minecraft.network.ConnectionProtocol;
 import net.minecraft.network.protocol.PacketFlow;
 import net.minecraft.server.Bootstrap;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.Rarity;
 import net.minecraft.world.level.block.Block;
@@ -19,6 +21,7 @@ import org.slf4j.Logger;
 
 import java.io.IOException;
 import java.lang.reflect.Modifier;
+import java.lang.reflect.ParameterizedType;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
@@ -35,10 +38,11 @@ public class DataExporter {
     private static final Map<Property<?>, String> blockStateProperties = new LinkedHashMap<>();
     private static final Set<Class<?>> blockClasses = new LinkedHashSet<>();
     private static final Set<Class<?>> itemClasses = new LinkedHashSet<>();
+    private static final Set<Class<?>> entityClasses = new LinkedHashSet<>();
+    private static final Map<EntityType<?>, Class<?>> entityClassesByType = new LinkedHashMap<>();
     private static final Set<Class<?>> enumClasses = new LinkedHashSet<>();
 
     public static void main(String[] args) throws IOException {
-        LOGGER.info("preparing export");
         SharedConstants.tryDetectVersion();
         Bootstrap.bootStrap();
 
@@ -48,6 +52,8 @@ public class DataExporter {
         exportBlockClasses(export);
         exportItems(export);
         exportItemClasses(export);
+        exportEntityTypes(export);
+        exportEntityClasses(export);
         exportPackets(export);
         exportEnumClasses(export);
         Files.writeString(Path.of("export.json"), GSON.toJson(export));
@@ -55,8 +61,6 @@ public class DataExporter {
     }
 
     private static void exportBlockStateProperties(JsonObject export) {
-        LOGGER.info("exporting block state properties");
-
         for (var field : BlockStateProperties.class.getDeclaredFields()) {
             if (!Modifier.isStatic(field.getModifiers())) continue;
             if (!Property.class.isAssignableFrom(field.getType())) continue;
@@ -74,10 +78,10 @@ public class DataExporter {
             properties.add(entry.getValue(), exportBlockStateProperty(entry.getKey()));
         }
         export.add("blockStateProperties", properties);
+        LOGGER.info("exported {} block state properties", properties.size());
     }
 
     private static void exportBlocks(JsonObject export) {
-        LOGGER.info("exporting {} blocks", Registry.BLOCK.size());
         var blocks = new JsonArray();
         for (var block : Registry.BLOCK) {
             var blockExport = new JsonObject();
@@ -91,13 +95,13 @@ public class DataExporter {
             var defaultState = exportBlockState(block.defaultBlockState());
             if (defaultState.size() > 0) blockExport.add("defaultState", defaultState);
             blocks.add(blockExport);
-            collectClasses(blockClasses, Block.class, block);
+            collectClasses(blockClasses, Block.class, block.getClass());
         }
         export.add("blocks", blocks);
+        LOGGER.info("exported {} blocks", blocks.size());
     }
 
     private static void exportBlockClasses(JsonObject export) {
-        LOGGER.info("exporting {} block classes", blockClasses.size());
         var classes = new JsonArray();
         for (var blockClass : blockClasses) {
             var classExport = new JsonObject();
@@ -120,30 +124,33 @@ public class DataExporter {
             classes.add(classExport);
         }
         export.add("blockClasses", classes);
+        LOGGER.info("exported {} block classes", classes.size());
     }
 
     private static void exportItems(JsonObject export) {
-        LOGGER.info("exporting {} items", Registry.ITEM.size());
         var items = new JsonArray();
         for (var item : Registry.ITEM) {
             var itemExport = new JsonObject();
             itemExport.addProperty("name", Registry.ITEM.getKey(item).toString());
             itemExport.addProperty("class", item.getClass().getSimpleName());
-            if (item.getMaxStackSize() != 64) itemExport.addProperty("maxStackSize", item.getMaxStackSize());
-            if (item.getMaxDamage() != 0) itemExport.addProperty("maxDamage", item.getMaxDamage());
-            if (item.hasCraftingRemainingItem())
-                itemExport.addProperty("craftingRemainingItem", Registry.ITEM.getKey(item.getCraftingRemainingItem()).toString());
+            var category = item.getItemCategory();
+            if (category != null) itemExport.addProperty("category", category.getId());
             var rarity = item.getRarity(item.getDefaultInstance());
             if (rarity != Rarity.COMMON) itemExport.addProperty("rarity", rarity.name().toLowerCase());
+            if (item.getMaxStackSize() != 64) itemExport.addProperty("maxStackSize", item.getMaxStackSize());
+            if (item.getMaxDamage() != 0) itemExport.addProperty("maxDamage", item.getMaxDamage());
             if (item.isFireResistant()) itemExport.addProperty("isFireResistant", true);
+            var craftingRemainingItem = item.getCraftingRemainingItem();
+            if (craftingRemainingItem != null)
+                itemExport.addProperty("craftingRemainingItem", Registry.ITEM.getKey(craftingRemainingItem).toString());
             items.add(itemExport);
-            collectClasses(itemClasses, Item.class, item);
+            collectClasses(itemClasses, Item.class, item.getClass());
         }
         export.add("items", items);
+        LOGGER.info("exported {} items", items.size());
     }
 
     private static void exportItemClasses(JsonObject export) {
-        LOGGER.info("exporting {} item classes", itemClasses.size());
         var classes = new JsonArray();
         for (var itemClass : itemClasses) {
             var classExport = new JsonObject();
@@ -153,10 +160,69 @@ public class DataExporter {
             classes.add(classExport);
         }
         export.add("itemClasses", classes);
+        LOGGER.info("exported {} item classes", classes.size());
+    }
+
+    private static void exportEntityTypes(JsonObject export) {
+        for (var field : EntityType.class.getDeclaredFields()) {
+            if (!Modifier.isStatic(field.getModifiers())) continue;
+            if (!EntityType.class.isAssignableFrom(field.getType())) continue;
+            field.setAccessible(true);
+            try {
+                var entityType = (EntityType<?>) field.get(EntityType.class);
+                Class<?> entityClass = (Class<?>) ((ParameterizedType) field.getGenericType()).getActualTypeArguments()[0];
+                entityClassesByType.put(entityType, entityClass);
+            } catch (IllegalAccessException e) {
+                throw new RuntimeException(e);
+            }
+        }
+        var entityTypes = new JsonArray();
+        for (var entityType : Registry.ENTITY_TYPE) {
+            var entityClass = entityClassesByType.get(entityType);
+            var entityTypeExport = new JsonObject();
+            entityTypeExport.addProperty("name", Registry.ENTITY_TYPE.getKey(entityType).toString());
+            entityTypeExport.addProperty("entityClass", entityClass.getSimpleName());
+            entityTypeExport.addProperty("category", entityType.getCategory().name().toLowerCase());
+            var immuneTo = new JsonArray();
+            try {
+                var field = entityType.getClass().getDeclaredField("immuneTo");
+                field.setAccessible(true);
+                for (var block : (Set<?>) field.get(entityType)) {
+                    immuneTo.add(Registry.BLOCK.getKey(((Block) block)).toString());
+                }
+            } catch (IllegalAccessException | NoSuchFieldException e) {
+                throw new RuntimeException(e);
+            }
+            if (immuneTo.size() > 0) entityTypeExport.add("immuneTo", immuneTo);
+            entityTypeExport.addProperty("canSerialize", entityType.canSerialize());
+            entityTypeExport.addProperty("canSummon", entityType.canSummon());
+            entityTypeExport.addProperty("fireImmune", entityType.fireImmune());
+            entityTypeExport.addProperty("canSpawnFarFromPlayer", entityType.canSpawnFarFromPlayer());
+            entityTypeExport.addProperty("clientTrackingRange", entityType.clientTrackingRange());
+            entityTypeExport.addProperty("width", entityType.getWidth());
+            entityTypeExport.addProperty("height", entityType.getHeight());
+            entityTypes.add(entityTypeExport);
+            collectClasses(entityClasses, Entity.class, entityClass);
+        }
+        export.add("entityTypes", entityTypes);
+        LOGGER.info("exported {} entity types", entityTypes.size());
+    }
+
+    private static void exportEntityClasses(JsonObject export) {
+        var classes = new JsonArray();
+        for (var entityClass : entityClasses) {
+            var classExport = new JsonObject();
+            classExport.addProperty("name", entityClass.getSimpleName());
+            var superclass = entityClass.getSuperclass();
+            if (Entity.class.isAssignableFrom(superclass))
+                classExport.addProperty("extends", superclass.getSimpleName());
+            classes.add(classExport);
+        }
+        export.add("entityClasses", classes);
+        LOGGER.info("exported {} entity classes", classes.size());
     }
 
     private static void exportPackets(JsonObject export) {
-        LOGGER.info("exporting packets");
         var protocols = new JsonObject();
         for (var protocol : ConnectionProtocol.values()) {
             var flows = new JsonObject();
@@ -177,7 +243,6 @@ public class DataExporter {
     }
 
     private static void exportEnumClasses(JsonObject export) {
-        LOGGER.info("exporting {} enum classes", enumClasses.size());
         var classes = new JsonArray();
         for (var enumClass : enumClasses) {
             var enumClassExport = new JsonObject();
@@ -192,6 +257,7 @@ public class DataExporter {
             classes.add(enumClassExport);
         }
         export.add("enumClasses", classes);
+        LOGGER.info("exported {} enum classes", classes.size());
     }
 
     private static JsonObject exportBlockStateProperty(Property<?> property) {
@@ -245,9 +311,8 @@ public class DataExporter {
         return hierarchy.stream().map(Class::getSimpleName).collect(Collectors.joining("."));
     }
 
-    private static <T> void collectClasses(Set<Class<?>> classes, Class<?> baseClass, T value) {
+    private static void collectClasses(Set<Class<?>> classes, Class<?> baseClass, Class<?> clazz) {
         var classHierarchy = new ArrayList<Class<?>>();
-        var clazz = (Class<?>) value.getClass();
         while (baseClass.isAssignableFrom(clazz)) {
             classHierarchy.add(clazz);
             clazz = clazz.getSuperclass();
